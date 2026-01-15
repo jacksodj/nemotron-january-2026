@@ -45,7 +45,12 @@ VLLM_MODEL=""
 ENABLE_ASR="true"
 ENABLE_TTS="true"
 ENABLE_LLM="true"
+ENABLE_A2F="false"  # Audio2Face-2D avatar (requires NGC_API_KEY)
 DETACH="true"
+
+# Audio2Face-2D NIM container settings
+A2F_CONTAINER_NAME="${NEMOTRON_A2F_CONTAINER:-nemotron-a2f}"
+A2F_IMAGE_NAME="${NEMOTRON_A2F_IMAGE:-nvcr.io/nim/nvidia/maxine-audio2face-2d:latest}"
 
 # Default model paths (auto-detected from HuggingFace cache)
 DEFAULT_Q8_MODEL="$(find "$HOME/.cache/huggingface/hub/models--unsloth--Nemotron-3-Nano-30B-A3B-GGUF" -name "*Q8*.gguf" 2>/dev/null | head -1)"
@@ -90,6 +95,7 @@ Start Options:
   --no-asr            Disable ASR service
   --no-tts            Disable TTS service
   --no-llm            Disable LLM service
+  --with-avatar       Enable Audio2Face-2D avatar (requires NGC_API_KEY)
   --detach, -d        Run in background (default)
   --foreground, -f    Run in foreground
 
@@ -99,6 +105,9 @@ Examples:
 
   # Start with vLLM
   ./scripts/nemotron.sh start --mode vllm --model nvidia/model-name
+
+  # Start with avatar (requires NGC_API_KEY)
+  NGC_API_KEY=your_key ./scripts/nemotron.sh start --with-avatar
 
   # Start ASR + TTS only (no LLM)
   ./scripts/nemotron.sh start --no-llm
@@ -113,6 +122,7 @@ Environment Variables:
   NEMOTRON_CONTAINER_NAME   Container name (default: nemotron)
   NEMOTRON_IMAGE            Docker image (default: nemotron-unified:cuda13)
   HUGGINGFACE_ACCESS_TOKEN  HuggingFace token for gated models
+  NGC_API_KEY               NGC API key (required for Audio2Face-2D avatar)
 EOF
 }
 
@@ -122,6 +132,14 @@ is_container_running() {
 
 is_container_exists() {
     docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"
+}
+
+is_a2f_container_running() {
+    docker ps --format '{{.Names}}' | grep -q "^${A2F_CONTAINER_NAME}$"
+}
+
+is_a2f_container_exists() {
+    docker ps -a --format '{{.Names}}' | grep -q "^${A2F_CONTAINER_NAME}$"
 }
 
 check_docker() {
@@ -166,6 +184,10 @@ cmd_start() {
                 ;;
             --no-llm)
                 ENABLE_LLM="false"
+                shift
+                ;;
+            --with-avatar|--avatar)
+                ENABLE_A2F="true"
                 shift
                 ;;
             --detach|-d)
@@ -290,6 +312,14 @@ cmd_start() {
         echo ""
     fi
 
+    # Validate NGC_API_KEY for A2F
+    if [[ "$ENABLE_A2F" == "true" ]] && [[ -z "$NGC_API_KEY" ]]; then
+        echo "ERROR: NGC_API_KEY is required for Audio2Face-2D avatar"
+        echo "  Get your key from: https://org.ngc.nvidia.com/setup/api-key"
+        echo "  Then: NGC_API_KEY=your_key ./scripts/nemotron.sh start --with-avatar"
+        exit 1
+    fi
+
     echo "============================================"
     echo "Starting Nemotron Container"
     echo "============================================"
@@ -301,6 +331,7 @@ cmd_start() {
     echo "    ASR: $([ "$ENABLE_ASR" == "true" ] && echo "ENABLED" || echo "DISABLED")"
     echo "    TTS: $([ "$ENABLE_TTS" == "true" ] && echo "ENABLED" || echo "DISABLED")"
     echo "    LLM: $([ "$ENABLE_LLM" == "true" ] && echo "ENABLED ($LLM_MODE)" || echo "DISABLED")"
+    echo "    A2F: $([ "$ENABLE_A2F" == "true" ] && echo "ENABLED (avatar)" || echo "DISABLED")"
     echo "============================================"
 
     # Build docker run command
@@ -391,6 +422,34 @@ cmd_start() {
     echo "Starting container..."
     docker "${DOCKER_ARGS[@]}"
 
+    # Start Audio2Face-2D container if enabled
+    if [[ "$ENABLE_A2F" == "true" ]]; then
+        echo ""
+        echo "Starting Audio2Face-2D avatar container..."
+
+        # Remove existing A2F container if stopped
+        if is_a2f_container_exists && ! is_a2f_container_running; then
+            docker rm "$A2F_CONTAINER_NAME" > /dev/null
+        fi
+
+        if ! is_a2f_container_running; then
+            docker run -d \
+                --name "$A2F_CONTAINER_NAME" \
+                --runtime=nvidia \
+                --gpus all \
+                --shm-size=8GB \
+                -e NGC_API_KEY="$NGC_API_KEY" \
+                -e NIM_HTTP_API_PORT=8000 \
+                -p 8002:8001 \
+                "$A2F_IMAGE_NAME" > /dev/null
+
+            echo "  Audio2Face-2D started (container: $A2F_CONTAINER_NAME)"
+            echo "  gRPC endpoint: localhost:8002"
+        else
+            echo "  Audio2Face-2D already running"
+        fi
+    fi
+
     if [[ "$DETACH" == "true" ]]; then
         echo ""
         echo "Container started in background."
@@ -408,6 +467,16 @@ cmd_start() {
 # =============================================================================
 cmd_stop() {
     check_docker
+
+    # Stop Audio2Face-2D container if running
+    if is_a2f_container_running; then
+        echo "Stopping Audio2Face-2D container '$A2F_CONTAINER_NAME'..."
+        docker stop "$A2F_CONTAINER_NAME" > /dev/null
+        docker rm "$A2F_CONTAINER_NAME" > /dev/null
+        echo "  Audio2Face-2D stopped and removed."
+    elif is_a2f_container_exists; then
+        docker rm "$A2F_CONTAINER_NAME" > /dev/null
+    fi
 
     if ! is_container_running; then
         if is_container_exists; then
@@ -486,6 +555,13 @@ cmd_status() {
             echo "    LLM (port 8000): UP"
         else
             echo "    LLM (port 8000): DOWN or DISABLED"
+        fi
+
+        # A2F health (Audio2Face-2D runs in separate container)
+        if is_a2f_container_running; then
+            echo "    A2F (port 8002): UP (avatar)"
+        else
+            echo "    A2F (port 8002): NOT RUNNING"
         fi
     else
         echo "  Container: STOPPED"
