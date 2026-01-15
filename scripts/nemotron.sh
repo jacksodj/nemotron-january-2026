@@ -237,7 +237,7 @@ cmd_start() {
                         echo "Using default Q8 model: $LLAMA_MODEL"
                     else
                         echo "ERROR: No Q8 model found in HuggingFace cache"
-                        echo "Download with: huggingface-cli download unsloth/Nemotron-3-Nano-30B-A3B-GGUF"
+                        echo "Download with: hf download unsloth/Nemotron-3-Nano-30B-A3B-GGUF"
                         echo "Or specify: --model /path/to/model.gguf"
                         exit 1
                     fi
@@ -256,7 +256,7 @@ cmd_start() {
                         echo "Using default Q4 model: $LLAMA_MODEL"
                     else
                         echo "ERROR: No Q4 model found in HuggingFace cache"
-                        echo "Download with: huggingface-cli download unsloth/Nemotron-3-Nano-30B-A3B-GGUF"
+                        echo "Download with: hf download unsloth/Nemotron-3-Nano-30B-A3B-GGUF"
                         echo "Or specify: --model /path/to/model.gguf"
                         exit 1
                     fi

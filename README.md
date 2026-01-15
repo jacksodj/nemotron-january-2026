@@ -305,10 +305,10 @@ Download LLM models (ASR and TTS are auto-downloaded on first run):
 
 ```bash
 # GGUF quantized models (Q8 and Q4 variants for llama.cpp)
-huggingface-cli download unsloth/Nemotron-3-Nano-30B-A3B-GGUF
+hf download unsloth/Nemotron-3-Nano-30B-A3B-GGUF
 
 # BF16 full precision (for vLLM)
-huggingface-cli download nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+hf download nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 ```
 
 ## Architecture
