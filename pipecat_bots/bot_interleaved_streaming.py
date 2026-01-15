@@ -5,11 +5,17 @@
 # Uses buffered LLM (sentence-boundary streaming) with adaptive WebSocket TTS.
 # Single-slot operation achieves 100% KV cache reuse across turns.
 # SmartTurn analyzer for responsive turn-taking.
+# Audio2Face-2D avatar for visual output.
 #
 # Environment variables:
 #   NVIDIA_ASR_URL        ASR WebSocket URL (default: ws://localhost:8080)
 #   NVIDIA_LLAMA_CPP_URL  llama.cpp API URL (default: http://localhost:8000)
 #   NVIDIA_TTS_URL        Magpie TTS server URL (default: http://localhost:8001)
+#   NVIDIA_A2F_URL        Audio2Face-2D gRPC URL (default: localhost:8002)
+#   AVATAR_VARIANT        Avatar gender: "female" or "male" (default: female)
+#   NVIDIA_A2F_AVATAR     Path to avatar image (default: assets/avatar_{variant}.png)
+#   TTS_VOICE             TTS voice (default: aria for female, john for male)
+#   ENABLE_AVATAR         Enable avatar output (default: true)
 #   ENABLE_RECORDING      Enable audio recording (default: false)
 #
 # Usage:
@@ -53,6 +59,7 @@ from nvidia_stt import NVidiaWebSocketSTTService
 from magpie_websocket_tts import MagpieWebSocketTTSService
 from llama_cpp_buffered_llm import LlamaCppBufferedLLMService
 from v2v_metrics import V2VMetricsProcessor
+from audio2face_2d import Audio2Face2DService, StaticAvatarService
 
 
 class ContextTimingWrapper(FrameProcessor):
@@ -74,9 +81,28 @@ NVIDIA_ASR_URL = os.getenv("NVIDIA_ASR_URL", "ws://localhost:8080")
 NVIDIA_LLAMA_CPP_URL = os.getenv("NVIDIA_LLAMA_CPP_URL", "http://localhost:8000")
 NVIDIA_TTS_URL = os.getenv("NVIDIA_TTS_URL", "http://localhost:8001")
 
+# Audio2Face-2D avatar configuration
+# Default to female avatar with matching female voice (aria)
+NVIDIA_A2F_URL = os.getenv("NVIDIA_A2F_URL", "localhost:8002")
+AVATAR_VARIANT = os.getenv("AVATAR_VARIANT", "female")  # "female" or "male"
+NVIDIA_A2F_AVATAR = os.getenv(
+    "NVIDIA_A2F_AVATAR",
+    str(Path(__file__).parent / "assets" / f"avatar_{AVATAR_VARIANT}.png")
+)
+ENABLE_AVATAR = os.getenv("ENABLE_AVATAR", "true").lower() == "true"
+
+# TTS voice configuration - match avatar gender
+# Available voices: aria (female), sofia (female), john (male), jason (male), leo (male)
+TTS_VOICE = os.getenv("TTS_VOICE", "aria" if AVATAR_VARIANT == "female" else "john")
+
 # Audio recording configuration
 ENABLE_RECORDING = os.getenv("ENABLE_RECORDING", "false").lower() == "true"
 RECORDINGS_DIR = Path(__file__).parent.parent / "recordings"
+
+# Avatar video output settings
+AVATAR_FPS = 30
+AVATAR_WIDTH = 512
+AVATAR_HEIGHT = 512
 
 # VAD configuration - used by both VAD analyzer and V2V metrics
 VAD_STOP_SECS = 0.2
@@ -108,11 +134,15 @@ async def save_audio_file(audio: bytes, sample_rate: int, num_channels: int, fil
     except Exception as e:
         logger.error(f"Failed to save recording to {filepath}: {e}")
 
-# Transport configurations with VAD and SmartTurn analyzer
+# Transport configurations with VAD, SmartTurn analyzer, and video output
 transport_params = {
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
+        camera_out_enabled=ENABLE_AVATAR,
+        camera_out_width=AVATAR_WIDTH,
+        camera_out_height=AVATAR_HEIGHT,
+        camera_out_framerate=AVATAR_FPS,
         vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=VAD_STOP_SECS)),
         turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams()),
     ),
@@ -125,6 +155,10 @@ transport_params = {
     "webrtc": lambda: TransportParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
+        camera_out_enabled=ENABLE_AVATAR,
+        camera_out_width=AVATAR_WIDTH,
+        camera_out_height=AVATAR_HEIGHT,
+        camera_out_framerate=AVATAR_FPS,
         vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=VAD_STOP_SECS)),
         turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams()),
     ),
@@ -132,10 +166,15 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info("Starting interleaved streaming bot")
+    logger.info("Starting interleaved streaming bot with avatar")
     logger.info(f"  ASR URL: {NVIDIA_ASR_URL}")
     logger.info(f"  LLM URL: {NVIDIA_LLAMA_CPP_URL}")
     logger.info(f"  TTS URL: {NVIDIA_TTS_URL}")
+    logger.info(f"  TTS voice: {TTS_VOICE}")
+    logger.info(f"  Avatar: {'enabled' if ENABLE_AVATAR else 'disabled'} ({AVATAR_VARIANT})")
+    if ENABLE_AVATAR:
+        logger.info(f"    A2F URL: {NVIDIA_A2F_URL}")
+        logger.info(f"    Avatar image: {NVIDIA_A2F_AVATAR}")
     logger.info(f"  Transport: {type(transport).__name__}")
     logger.info(f"  Recording: {'enabled' if ENABLE_RECORDING else 'disabled'}")
     logger.info(f"  VAD stop_secs: {VAD_STOP_SECS}s")
@@ -148,9 +187,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     # WebSocket Magpie TTS with adaptive mode
     # Adaptive mode: streaming for first segment (~370ms TTFB), batch for subsequent (quality)
+    # Voice matches avatar gender (aria=female, john=male)
     tts = MagpieWebSocketTTSService(
         server_url=NVIDIA_TTS_URL,
-        voice="aria",
+        voice=TTS_VOICE,
         language="en",
         params=MagpieWebSocketTTSService.InputParams(
             language="en",
@@ -158,10 +198,29 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             use_adaptive_mode=True,
         ),
     )
-    logger.info("Using WebSocket Magpie TTS (adaptive mode)")
+    logger.info(f"Using WebSocket Magpie TTS (adaptive mode, voice={TTS_VOICE})")
 
     # Voice-to-voice response time metrics
     v2v_metrics = V2VMetricsProcessor(vad_stop_secs=VAD_STOP_SECS)
+
+    # Audio2Face-2D avatar service
+    # Uses NVIDIA A2F NIM to animate avatar based on TTS audio
+    # Falls back to static avatar display if A2F NIM is not available
+    avatar = None
+    if ENABLE_AVATAR:
+        try:
+            avatar = Audio2Face2DService(
+                server_url=NVIDIA_A2F_URL,
+                avatar_path=NVIDIA_A2F_AVATAR,
+            )
+            logger.info("Using Audio2Face-2D avatar service")
+        except Exception as e:
+            logger.warning(f"Audio2Face-2D not available, using static avatar: {e}")
+            avatar = StaticAvatarService(
+                avatar_path=NVIDIA_A2F_AVATAR,
+                output_fps=1,  # Low FPS for static image
+            )
+            logger.info("Using static avatar display")
 
     # Audio recording - stereo: user (left), bot (right)
     # Only create if recording is enabled
@@ -231,9 +290,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         context_timing,  # Log when LLMMessagesFrame passes through
         llm,
         tts,
+    ]
+
+    # Add avatar service after TTS (receives audio frames for animation)
+    if avatar:
+        pipeline_processors.append(avatar)
+
+    pipeline_processors.extend([
         v2v_metrics,
         transport.output(),
-    ]
+    ])
 
     # Add audio buffer if recording is enabled
     if audiobuffer:
