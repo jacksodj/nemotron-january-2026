@@ -12,7 +12,9 @@
 #   NVIDIA_LLAMA_CPP_URL  llama.cpp API URL (default: http://localhost:8000)
 #   NVIDIA_TTS_URL        Magpie TTS server URL (default: http://localhost:8001)
 #   NVIDIA_A2F_URL        Audio2Face-2D gRPC URL (default: localhost:8002)
-#   NVIDIA_A2F_AVATAR     Path to avatar image (default: assets/avatar.png)
+#   AVATAR_VARIANT        Avatar gender: "female" or "male" (default: female)
+#   NVIDIA_A2F_AVATAR     Path to avatar image (default: assets/avatar_{variant}.png)
+#   TTS_VOICE             TTS voice (default: aria for female, john for male)
 #   ENABLE_AVATAR         Enable avatar output (default: true)
 #   ENABLE_RECORDING      Enable audio recording (default: false)
 #
@@ -80,12 +82,18 @@ NVIDIA_LLAMA_CPP_URL = os.getenv("NVIDIA_LLAMA_CPP_URL", "http://localhost:8000"
 NVIDIA_TTS_URL = os.getenv("NVIDIA_TTS_URL", "http://localhost:8001")
 
 # Audio2Face-2D avatar configuration
+# Default to female avatar with matching female voice (aria)
 NVIDIA_A2F_URL = os.getenv("NVIDIA_A2F_URL", "localhost:8002")
+AVATAR_VARIANT = os.getenv("AVATAR_VARIANT", "female")  # "female" or "male"
 NVIDIA_A2F_AVATAR = os.getenv(
     "NVIDIA_A2F_AVATAR",
-    str(Path(__file__).parent / "assets" / "avatar.png")
+    str(Path(__file__).parent / "assets" / f"avatar_{AVATAR_VARIANT}.png")
 )
 ENABLE_AVATAR = os.getenv("ENABLE_AVATAR", "true").lower() == "true"
+
+# TTS voice configuration - match avatar gender
+# Available voices: aria (female), sofia (female), john (male), jason (male), leo (male)
+TTS_VOICE = os.getenv("TTS_VOICE", "aria" if AVATAR_VARIANT == "female" else "john")
 
 # Audio recording configuration
 ENABLE_RECORDING = os.getenv("ENABLE_RECORDING", "false").lower() == "true"
@@ -162,7 +170,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"  ASR URL: {NVIDIA_ASR_URL}")
     logger.info(f"  LLM URL: {NVIDIA_LLAMA_CPP_URL}")
     logger.info(f"  TTS URL: {NVIDIA_TTS_URL}")
-    logger.info(f"  Avatar: {'enabled' if ENABLE_AVATAR else 'disabled'}")
+    logger.info(f"  TTS voice: {TTS_VOICE}")
+    logger.info(f"  Avatar: {'enabled' if ENABLE_AVATAR else 'disabled'} ({AVATAR_VARIANT})")
     if ENABLE_AVATAR:
         logger.info(f"    A2F URL: {NVIDIA_A2F_URL}")
         logger.info(f"    Avatar image: {NVIDIA_A2F_AVATAR}")
@@ -178,9 +187,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     # WebSocket Magpie TTS with adaptive mode
     # Adaptive mode: streaming for first segment (~370ms TTFB), batch for subsequent (quality)
+    # Voice matches avatar gender (aria=female, john=male)
     tts = MagpieWebSocketTTSService(
         server_url=NVIDIA_TTS_URL,
-        voice="aria",
+        voice=TTS_VOICE,
         language="en",
         params=MagpieWebSocketTTSService.InputParams(
             language="en",
@@ -188,7 +198,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             use_adaptive_mode=True,
         ),
     )
-    logger.info("Using WebSocket Magpie TTS (adaptive mode)")
+    logger.info(f"Using WebSocket Magpie TTS (adaptive mode, voice={TTS_VOICE})")
 
     # Voice-to-voice response time metrics
     v2v_metrics = V2VMetricsProcessor(vad_stop_secs=VAD_STOP_SECS)
